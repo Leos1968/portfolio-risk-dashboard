@@ -98,10 +98,11 @@ def get_report(df: pd.DataFrame) -> tuple[dict, str]:
         ]
     }
     try:
-        resp = requests.post(f"{API_URL}/api/portfolio-summary", json=payload, timeout=3)
+        resp = requests.post(f"{API_URL}/api/portfolio-summary", json=payload, timeout=5)
         resp.raise_for_status()
         return resp.json(), "api"
     except requests.RequestException:
+        # Fallback to local engine (which will fetch live yfinance data directly)
         return analytics.portfolio_report(df), "local"
 
 
@@ -177,34 +178,55 @@ def main() -> None:
     st.title("Institutional Portfolio Risk & Analytics")
 
     raw = load_holdings()
-    try:
-        report, source = get_report(raw)
-    except ValueError as exc:
-        st.error(f"Data validation failed: {exc}")
-        st.stop()
+    with st.spinner("Fetching live market data and calculating risk metrics..."):
+        try:
+            report, source = get_report(raw)
+        except ValueError as exc:
+            st.error(f"Data validation failed: {exc}")
+            st.stop()
 
     st.caption(
-        "Analytics served by FastAPI backend" if source == "api"
-        else "Backend offline — analytics computed locally (identical engine)."
+        "⚡ Analytics & Live Market Data served by FastAPI backend" if source == "api"
+        else "💻 Backend offline — computations & live market data processed locally."
     )
 
     holdings = pd.DataFrame(report["holdings"])
 
-    # --- KPI row -----------------------------------------------------------
-    c1, c2, c3, c4 = st.columns(4)
+    # --- KPI row (Upgraded to 6 columns for new metrics) -------------------
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    
     c1.metric("Total Exposure", f"${report['total_exposure']:,.0f}")
+    
     c2.metric(
         "Unrealized PnL",
         f"${report['total_unrealized_pnl']:,.0f}",
         f"{report['total_unrealized_pnl'] / report['total_cost_basis']:+.1%}",
     )
+    
     c3.metric("Concentration (HHI)", f"{report['hhi']:,.0f}", report["hhi_classification"], delta_color="off")
+    
+    largest = report.get("largest_position", {"ticker": "N/A", "weight": 0})
     c4.metric(
         "Largest Position",
-        report["largest_position"]["ticker"],
-        f"{report['largest_position']['weight']:.1%} of book",
+        largest["ticker"],
+        f"{largest['weight']:.1%} of book",
         delta_color="off",
     )
+    
+    # Safely extract the new metrics depending on dict keys
+    beta_val = report.get("portfolio_beta", report.get("beta", "N/A"))
+    if isinstance(beta_val, (int, float)):
+        c5.metric("Portfolio Beta (β)", f"{beta_val:.2f}")
+    else:
+        c5.metric("Portfolio Beta (β)", "N/A")
+        
+    var_val = report.get("var_dollar", report.get("var_95", "N/A"))
+    if isinstance(var_val, (int, float)):
+        c6.metric("95% 1-Day VaR", f"${var_val:,.0f}")
+    else:
+        c6.metric("95% 1-Day VaR", "N/A")
+
+    st.markdown("---")
 
     # --- Charts ------------------------------------------------------------
     left, right = st.columns(2)
@@ -216,8 +238,15 @@ def main() -> None:
         st.plotly_chart(hhi_gauge(report["hhi"], report["hhi_classification"]), use_container_width=True)
 
     st.subheader("Tier Growth Trajectories (trailing 12 months)")
-    exposed = analytics.compute_exposure(analytics.validate_holdings(raw))
-    st.plotly_chart(tier_growth_chart(analytics.tier_growth_trajectories(exposed)), use_container_width=True)
+    
+    # Handle trajectories dynamically depending on API structure
+    if "trajectories" in report:
+        traj_df = pd.DataFrame(report["trajectories"])
+        traj_df["Period"] = pd.to_datetime(traj_df["Period"])
+        st.plotly_chart(tier_growth_chart(traj_df), use_container_width=True)
+    else:
+        exposed = analytics.compute_exposure(analytics.validate_holdings(raw))
+        st.plotly_chart(tier_growth_chart(analytics.tier_growth_trajectories(exposed)), use_container_width=True)
 
     # --- Tier summary + holdings detail ------------------------------------
     st.subheader("Tier Summary")

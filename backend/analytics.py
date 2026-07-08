@@ -200,11 +200,17 @@ def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
 
     # Download S&P 500 benchmark matrix
     spy_data = yf.download("^GSPC", period="1y", interval="1d")["Close"]
+    
+    # Safely extract Series regardless of yfinance multi-index updates
+    if isinstance(spy_data, pd.DataFrame):
+        spy_data = spy_data.iloc[:, 0]
+        
     spy_returns = spy_data.pct_change().dropna()
+    spy_returns.name = "SPY_Returns"  # Force a safe column name here
 
     # Intersect matrices on index dates
-    combined = daily_returns.join(spy_returns, rsuffix="_spy").dropna()
-    spy_ret_series = combined["Close_spy"]
+    combined = daily_returns.join(spy_returns, how="inner").dropna()
+    spy_ret_series = combined["SPY_Returns"]
     market_variance = spy_ret_series.var()
 
     portfolio_beta = 0.0
@@ -243,7 +249,6 @@ def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
         "var_dollar": round(var_dollar, 2),
         "individual_betas": individual_betas
     }
-
 
 # ---------------------------------------------------------------------------
 # Top-level report

@@ -182,7 +182,7 @@ def tier_growth_trajectories(
 
 def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
     """Calculates Portfolio Beta vs S&P 500 and 1-Day 95% Parametric Value at Risk (VaR)
-    utilizing live 1-year historical pricing arrays via yfinance.
+    utilizing a single, unified live pricing matrix via yfinance.
     """
     tickers = holdings["Ticker"].tolist()
     weights_dict = holdings.set_index("Ticker")["Weight"].to_dict()
@@ -191,53 +191,66 @@ def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
     if not tickers or total_value <= 0:
         return {"portfolio_beta": 1.0, "var_95_percent": 0.0, "var_dollar": 0.0, "individual_betas": {}}
 
-    # Download historical arrays
-    hist_data = yf.download(tickers, period="1y", interval="1d")["Close"]
-    if isinstance(hist_data, pd.Series):
-        hist_data = hist_data.to_frame(name=tickers[0])
-        
+    # Download EVERYTHING (assets + benchmark) in one single API call. 
+    # This guarantees perfect alignment and avoids Pandas Multi-Index join errors.
+    all_tickers = tickers + ["^GSPC"]
+    
+    hist_data = yf.download(all_tickers, period="1y", interval="1d")["Close"]
+    
+    # yfinance sometimes returns a MultiIndex column structure. Flatten it defensively.
+    if isinstance(hist_data.columns, pd.MultiIndex):
+        if 'Ticker' in hist_data.columns.names:
+            hist_data.columns = hist_data.columns.get_level_values('Ticker')
+        else:
+            hist_data.columns = [str(c[-1]) for c in hist_data.columns]
+
     daily_returns = hist_data.pct_change().dropna()
 
-    # Download S&P 500 benchmark matrix
-    spy_data = yf.download("^GSPC", period="1y", interval="1d")["Close"]
-    
-    # Safely extract Series regardless of yfinance multi-index updates
-    if isinstance(spy_data, pd.DataFrame):
-        spy_data = spy_data.iloc[:, 0]
-        
-    spy_returns = spy_data.pct_change().dropna()
-    spy_returns.name = "SPY_Returns"  # Force a safe column name here
+    # Extract SPY returns and isolate the asset matrix
+    if "^GSPC" in daily_returns.columns:
+        spy_ret_series = daily_returns["^GSPC"]
+        asset_returns = daily_returns.drop(columns=["^GSPC"])
+    else:
+        # Fallback flatline if the benchmark drops
+        spy_ret_series = pd.Series(0.0, index=daily_returns.index)
+        asset_returns = daily_returns
 
-    # Intersect matrices on index dates
-    combined = daily_returns.join(spy_returns, how="inner").dropna()
-    spy_ret_series = combined["SPY_Returns"]
     market_variance = spy_ret_series.var()
+    if pd.isna(market_variance) or market_variance == 0:
+        market_variance = 0.0001
 
     portfolio_beta = 0.0
     individual_betas = {}
 
+    # Calculate Beta covariance mathematically mapped to valid downloads
     for ticker in tickers:
-        if ticker in combined.columns:
-            asset_returns = combined[ticker]
-            covariance = asset_returns.cov(spy_ret_series)
-            asset_beta = covariance / market_variance if market_variance != 0 else 1.0
+        if ticker in asset_returns.columns:
+            asset_series = asset_returns[ticker]
+            covariance = asset_series.cov(spy_ret_series)
+            asset_beta = covariance / market_variance
         else:
             asset_beta = 1.0
         
         individual_betas[ticker] = round(asset_beta, 2)
         portfolio_beta += weights_dict.get(ticker, 0.0) * asset_beta
 
-    # Parametric Value at Risk calculation using asset covariance matrix
-    cov_matrix = daily_returns.cov()
-    weight_vector = np.array([weights_dict.get(t, 0.0) for t in tickers])
+    # Parametric Value at Risk (VaR) utilizing asset covariance matrix
+    cov_matrix = asset_returns.cov()
     
-    # Check if matrices match correctly before dot-product processing
-    valid_tickers = [t for t in tickers if t in cov_matrix.index]
-    if len(valid_tickers) == len(tickers):
-        portfolio_variance = np.dot(weight_vector.T, np.dot(cov_matrix, weight_vector))
+    # Build weight vector strictly aligned with the actual downloaded columns
+    valid_tickers = [t for t in tickers if t in cov_matrix.columns]
+    
+    if len(valid_tickers) > 0:
+        aligned_weights = np.array([weights_dict.get(t, 0.0) for t in valid_tickers])
+        # Re-normalize just in case a ticker was dropped by the API
+        if aligned_weights.sum() > 0:
+            aligned_weights = aligned_weights / aligned_weights.sum()
+            
+        sub_cov_matrix = cov_matrix.loc[valid_tickers, valid_tickers]
+        portfolio_variance = np.dot(aligned_weights.T, np.dot(sub_cov_matrix, aligned_weights))
         portfolio_volatility = np.sqrt(portfolio_variance)
     else:
-        portfolio_volatility = 0.02  # Default fallback benchmark matrix variance
+        portfolio_volatility = 0.02
 
     # 95% confidence level maps to a Z-score factor of 1.645
     var_95_percent = 1.645 * portfolio_volatility
@@ -249,7 +262,6 @@ def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
         "var_dollar": round(var_dollar, 2),
         "individual_betas": individual_betas
     }
-
 # ---------------------------------------------------------------------------
 # Top-level report
 # ---------------------------------------------------------------------------

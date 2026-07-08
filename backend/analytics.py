@@ -65,20 +65,14 @@ def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
         
         hist_data = pd.DataFrame()
         
-        # Safely extract the 'Close' prices regardless of how yfinance formats the MultiIndex columns
+        # Extract the 'Close' prices cleanly using pandas cross-section (xs)
         if isinstance(raw_data.columns, pd.MultiIndex):
             if 'Close' in raw_data.columns.get_level_values(0):
-                hist_data = raw_data['Close']
-            elif 'Close' in raw_data.columns.get_level_values(1):
-                hist_data = raw_data.xs('Close', level=1, axis=1)
-            else:
-                # Fallback if 'Close' is missing but 'Adj Close' exists
-                if 'Adj Close' in raw_data.columns.get_level_values(0):
-                    hist_data = raw_data['Adj Close']
-                elif 'Adj Close' in raw_data.columns.get_level_values(1):
-                    hist_data = raw_data.xs('Adj Close', level=1, axis=1)
+                hist_data = raw_data.xs('Close', axis=1, level=0)
+            elif 'Adj Close' in raw_data.columns.get_level_values(0):
+                hist_data = raw_data.xs('Adj Close', axis=1, level=0)
         else:
-            # Single ticker fallback
+            # Fallback for older versions or if only a single ticker was passed
             if 'Close' in raw_data.columns:
                 hist_data = pd.DataFrame({all_tickers[0]: raw_data['Close']})
             elif 'Adj Close' in raw_data.columns:

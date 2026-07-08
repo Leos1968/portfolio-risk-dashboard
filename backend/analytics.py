@@ -1,215 +1,114 @@
-"""
-Quantitative Analytics Engine
-=============================
-Pure, stateless functions for portfolio risk analytics. No I/O, no framework
-dependencies — this module is imported by both the FastAPI service
-(`backend/main.py`) and the Streamlit frontend (`frontend/app.py`), so it must
-stay free of web-layer concerns.
-
-Metrics implemented
--------------------
-1. Total Portfolio Exposure   — sum of Shares × Current_Price (Live Market Updated)
-2. Concentration Risk (HHI)   — Herfindahl-Hirschman Index over position weights
-3. Tier-Level Performance     — exposure-weighted returns per investment tier
-                                (Growth / Core / Defensive) + synthetic
-                                trailing trajectories for visualization
-4. Systematic Volatility (β)  — Covariance matrix calculation against S&P 500
-5. Value at Risk (95% VaR)    — Parametric daily risk threshold loss limits
-"""
-
-from __future__ import annotations
-
-from typing import Any
-
-import numpy as np
 import pandas as pd
+import numpy as np
+from typing import Any
 import yfinance as yf
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-REQUIRED_COLUMNS = ["Ticker", "Shares", "Average_Price", "Current_Price", "Tier"]
-VALID_TIERS = ("Growth", "Core", "Defensive")
-
-# Standard DOJ/FTC-style HHI bands, applied to portfolio weights (0–10,000 scale)
-HHI_DIVERSIFIED_MAX = 1_500
-HHI_MODERATE_MAX = 2_500
-
-# Tier assumptions used only for the synthetic trailing trajectories
-# (annualized drift, annualized volatility)
-_TIER_PROFILES = {
-    "Growth": (0.18, 0.28),
-    "Core": (0.10, 0.16),
-    "Defensive": (0.05, 0.08),
-}
-
-
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
-
-def validate_holdings(df: pd.DataFrame) -> pd.DataFrame:
-    """Validate and normalize a holdings DataFrame.
-
-    Ensures required columns exist, coerces numeric types, drops unusable
-    rows, and normalizes tier labels. Returns a clean copy.
-    """
-    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        raise ValueError(
-            f"Holdings data is missing required column(s): {', '.join(missing)}. "
-            f"Expected columns: {', '.join(REQUIRED_COLUMNS)}"
-        )
-
-    clean = df[REQUIRED_COLUMNS].copy()
-    clean["Ticker"] = clean["Ticker"].astype(str).str.strip().str.upper()
-    clean["Tier"] = clean["Tier"].astype(str).str.strip().str.title()
-
-    for col in ("Shares", "Average_Price", "Current_Price"):
-        clean[col] = pd.to_numeric(clean[col], errors="coerce")
-
-    clean = clean.dropna(subset=["Shares", "Average_Price", "Current_Price"])
-    clean = clean[(clean["Shares"] > 0) & (clean["Average_Price"] >= 0)]
-
-    unknown = set(clean["Tier"]) - set(VALID_TIERS)
-    if unknown:
-        clean.loc[clean["Tier"].isin(unknown), "Tier"] = "Core"
-
-    if clean.empty:
-        raise ValueError("No valid holdings rows after validation.")
-
-    return clean.reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# Core metrics
-# ---------------------------------------------------------------------------
-
-def compute_exposure(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy of the holdings with per-position exposure and weights."""
-    out = df.copy()
-    out["Exposure"] = out["Shares"] * out["Current_Price"]
-    out["Cost_Basis"] = out["Shares"] * out["Average_Price"]
-    out["Unrealized_PnL"] = out["Exposure"] - out["Cost_Basis"]
-    out["Return_Pct"] = np.where(
-        out["Cost_Basis"] > 0,
-        out["Unrealized_PnL"] / out["Cost_Basis"],
-        0.0,
-    )
-    total = out["Exposure"].sum()
-    out["Weight"] = out["Exposure"] / total if total > 0 else 0.0
-    return out
-
-
-def compute_hhi(weights: np.ndarray | pd.Series) -> float:
-    """Herfindahl-Hirschman Index on the 0–10,000 scale."""
-    w = np.asarray(weights, dtype=float)
-    if w.sum() <= 0:
-        return 0.0
-    w = w / w.sum()
-    return float(np.sum((w * 100.0) ** 2))
-
-
-def classify_hhi(hhi: float) -> str:
-    """Map an HHI score to a qualitative concentration band."""
-    if hhi < HHI_DIVERSIFIED_MAX:
-        return "Diversified"
-    if hhi < HHI_MODERATE_MAX:
-        return "Moderately Concentrated"
-    return "Highly Concentrated"
-
-
-def effective_positions(hhi: float) -> float:
-    """Effective number of independent positions implied by the HHI."""
-    return 10_000.0 / hhi if hhi > 0 else 0.0
-
-
-# ---------------------------------------------------------------------------
-# Tier analytics
-# ---------------------------------------------------------------------------
-
-def tier_summary(df_exposed: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate exposure and weighted performance by investment tier."""
-    def _agg(group: pd.DataFrame) -> pd.Series:
-        exp = group["Exposure"].sum()
-        w_ret = (
-            float(np.average(group["Return_Pct"], weights=group["Exposure"]))
-            if exp > 0
-            else 0.0
-        )
-        return pd.Series(
-            {
-                "Exposure": exp,
-                "Positions": len(group),
-                "Weighted_Return": w_ret,
-            }
-        )
-
-    summary = df_exposed.groupby("Tier").apply(_agg, include_groups=False)
-    total = summary["Exposure"].sum()
-    summary["Weight"] = summary["Exposure"] / total if total > 0 else 0.0
-    order = [t for t in VALID_TIERS if t in summary.index]
-    return summary.loc[order]
-
-
-def tier_growth_trajectories(
-    df_exposed: pd.DataFrame,
-    periods: int = 12,
-    seed: int = 42,
-) -> pd.DataFrame:
-    """Synthetic trailing growth trajectories per tier (indexed to 100)."""
-    rng = np.random.default_rng(seed)
-    tiers = tier_summary(df_exposed)
-    dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=periods + 1, freq="ME")
-
-    out = pd.DataFrame({"Period": dates})
-    for tier, row in tiers.iterrows():
-        drift, vol = _TIER_PROFILES.get(tier, _TIER_PROFILES["Core"])
-        dt = 1.0 / 12.0
-        shocks = rng.normal(drift * dt, vol * np.sqrt(dt), size=periods)
-        path = np.concatenate([[0.0], np.cumsum(shocks)])
-        target = np.log1p(row["Weighted_Return"])
-        if abs(path[-1]) > 1e-9:
-            path = path * (target / path[-1])
-        out[tier] = 100.0 * np.exp(path)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Advanced Volatility & Statistical Risk Calculations
-# ---------------------------------------------------------------------------
-
-def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
-    """Calculates Portfolio Beta vs S&P 500 and 1-Day 95% Parametric Value at Risk (VaR)
-    utilizing a single, unified live pricing matrix via yfinance.
-    """
-    tickers = holdings["Ticker"].tolist()
-    weights_dict = holdings.set_index("Ticker")["Weight"].to_dict()
+def compute_portfolio_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
+    """Calculates basic portfolio level metrics: Total Value and Cash balance."""
+    if holdings.empty:
+        return {"total_value": 0.0, "cash_balance": 0.0}
+    
     total_value = holdings["Exposure"].sum()
     
-    if not tickers or total_value <= 0:
+    # Safely extract cash balance regardless of capitalization
+    cash_holdings = holdings[holdings["Asset Class"].str.upper() == "CASH"]
+    cash_balance = cash_holdings["Exposure"].sum() if not cash_holdings.empty else 0.0
+    
+    return {
+        "total_value": round(total_value, 2),
+        "cash_balance": round(cash_balance, 2)
+    }
+
+def get_sector_allocations(holdings: pd.DataFrame) -> dict[str, float]:
+    """Aggregates portfolio weight by sector."""
+    if holdings.empty or "Sector" not in holdings.columns:
+        return {}
+        
+    sector_group = holdings.groupby("Sector")["Weight"].sum().to_dict()
+    
+    # Normalize to ensure it sums to 100%
+    total_weight = sum(sector_group.values())
+    if total_weight > 0:
+        sector_group = {k: round((v / total_weight) * 100, 2) for k, v in sector_group.items()}
+    return sector_group
+
+def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
+    """
+    Calculates Portfolio Beta vs S&P 500 and 1-Day 95% Parametric Value at Risk (VaR)
+    utilizing a highly robust unified pricing matrix that resists yfinance API changes.
+    """
+    if holdings.empty or "Ticker" not in holdings.columns:
         return {"portfolio_beta": 1.0, "var_95_percent": 0.0, "var_dollar": 0.0, "individual_betas": {}}
 
-    # Download EVERYTHING (assets + benchmark) in one single API call. 
-    # This guarantees perfect alignment and avoids Pandas Multi-Index join errors.
-    all_tickers = tickers + ["^GSPC"]
-    
-    hist_data = yf.download(all_tickers, period="1y", interval="1d")["Close"]
-    
-    # yfinance sometimes returns a MultiIndex column structure. Flatten it defensively.
-    if isinstance(hist_data.columns, pd.MultiIndex):
-        if 'Ticker' in hist_data.columns.names:
-            hist_data.columns = hist_data.columns.get_level_values('Ticker')
-        else:
-            hist_data.columns = [str(c[-1]) for c in hist_data.columns]
+    # Filter out cash for risk calculations
+    risk_assets = holdings[holdings["Asset Class"].str.upper() != "CASH"].copy()
+    if risk_assets.empty:
+        return {"portfolio_beta": 0.0, "var_95_percent": 0.0, "var_dollar": 0.0, "individual_betas": {}}
 
-    daily_returns = hist_data.pct_change().dropna()
+    tickers = risk_assets["Ticker"].unique().tolist()
+    
+    # Recalculate weights relative to the total portfolio exposure
+    total_value = holdings["Exposure"].sum()
+    if total_value <= 0:
+        return {"portfolio_beta": 1.0, "var_95_percent": 0.0, "var_dollar": 0.0, "individual_betas": {}}
+        
+    weights_dict = {row["Ticker"]: row["Exposure"] / total_value for _, row in risk_assets.iterrows()}
+
+    # Include benchmark directly into the download request
+    benchmark = "^GSPC"
+    all_tickers = list(set(tickers + [benchmark]))
+    
+    # 1) Robustly download pricing data bypassing yf.download multi-index bugs
+    try:
+        # auto_adjust=False prevents newer yfinance versions from dropping the standard 'Close' column
+        raw_data = yf.download(all_tickers, period="1y", interval="1d", auto_adjust=False, progress=False)
+        
+        hist_data = pd.DataFrame()
+        
+        # Safely extract the 'Close' prices regardless of how yfinance formats the MultiIndex columns
+        if isinstance(raw_data.columns, pd.MultiIndex):
+            if 'Close' in raw_data.columns.get_level_values(0):
+                hist_data = raw_data['Close']
+            elif 'Close' in raw_data.columns.get_level_values(1):
+                hist_data = raw_data.xs('Close', level=1, axis=1)
+            else:
+                # Fallback if 'Close' is missing but 'Adj Close' exists
+                if 'Adj Close' in raw_data.columns.get_level_values(0):
+                    hist_data = raw_data['Adj Close']
+                elif 'Adj Close' in raw_data.columns.get_level_values(1):
+                    hist_data = raw_data.xs('Adj Close', level=1, axis=1)
+        else:
+            # Single ticker fallback
+            if 'Close' in raw_data.columns:
+                hist_data = pd.DataFrame({all_tickers[0]: raw_data['Close']})
+            elif 'Adj Close' in raw_data.columns:
+                hist_data = pd.DataFrame({all_tickers[0]: raw_data['Adj Close']})
+                
+    except Exception:
+        hist_data = pd.DataFrame()
+
+    if hist_data.empty:
+        return {"portfolio_beta": 1.0, "var_95_percent": 0.0, "var_dollar": 0.0, "individual_betas": {}}
+
+    # Force numeric types to prevent Pandas pct_change KeyErrors on corrupted object columns
+    hist_data = hist_data.apply(pd.to_numeric, errors='coerce')
+    
+    # Clean data and compute returns safely
+    hist_data = hist_data.ffill().bfill()
+    
+    # Pandas 2.1+ compatibility check for pct_change fill_method deprecation
+    try:
+        daily_returns = hist_data.pct_change(fill_method=None).dropna()
+    except TypeError:
+        daily_returns = hist_data.pct_change().dropna()
+
+    if daily_returns.empty:
+        return {"portfolio_beta": 1.0, "var_95_percent": 0.0, "var_dollar": 0.0, "individual_betas": {}}
 
     # Extract SPY returns and isolate the asset matrix
-    if "^GSPC" in daily_returns.columns:
-        spy_ret_series = daily_returns["^GSPC"]
-        asset_returns = daily_returns.drop(columns=["^GSPC"])
+    if benchmark in daily_returns.columns:
+        spy_ret_series = daily_returns[benchmark]
+        asset_returns = daily_returns.drop(columns=[benchmark])
     else:
         # Fallback flatline if the benchmark drops
         spy_ret_series = pd.Series(0.0, index=daily_returns.index)
@@ -222,7 +121,7 @@ def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
     portfolio_beta = 0.0
     individual_betas = {}
 
-    # Calculate Beta covariance mathematically mapped to valid downloads
+    # Calculate Beta covariance mathematically
     for ticker in tickers:
         if ticker in asset_returns.columns:
             asset_series = asset_returns[ticker]
@@ -242,6 +141,7 @@ def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
     
     if len(valid_tickers) > 0:
         aligned_weights = np.array([weights_dict.get(t, 0.0) for t in valid_tickers])
+        
         # Re-normalize just in case a ticker was dropped by the API
         if aligned_weights.sum() > 0:
             aligned_weights = aligned_weights / aligned_weights.sum()
@@ -262,62 +162,28 @@ def compute_advanced_risk_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
         "var_dollar": round(var_dollar, 2),
         "individual_betas": individual_betas
     }
-# ---------------------------------------------------------------------------
-# Top-level report
-# ---------------------------------------------------------------------------
 
-def portfolio_report(df: pd.DataFrame) -> dict[str, Any]:
-    """Run the full analytics pipeline and return a JSON-serializable report.
-
+def portfolio_report(holdings: pd.DataFrame) -> dict[str, Any]:
+    """
+    Master function to generate a comprehensive institutional risk report.
     This is the single entry point used by the API layer.
     """
-    validated = validate_holdings(df)
+    # 1. Base Portfolio Calculations
+    base_metrics = compute_portfolio_metrics(holdings)
     
-    # Intercept to fetch actual live pricing directly from yfinance to keep prices real-time
-    try:
-        tickers = validated["Ticker"].tolist()
-        live_snapshot = yf.download(tickers, period="1d")["Close"].iloc[-1]
-        for ticker in tickers:
-            if ticker in live_snapshot.index:
-                validated.loc[validated["Ticker"] == ticker, "Current_Price"] = live_snapshot[ticker]
-    except Exception:
-        pass # Fall back to file-provided Current_Price safely if API network buffers
-
-    holdings = compute_exposure(validated)
-    hhi = compute_hhi(holdings["Weight"].to_numpy())
-    tiers = tier_summary(holdings)
-    advanced_risk = compute_advanced_risk_metrics(holdings)
-
-    # Convert dataframe trajectory rows neatly into records for json output parsing
-    trajectories = tier_growth_trajectories(holdings)
-    trajectories["Period"] = trajectories["Period"].dt.strftime("%Y-%m-%d")
-    trajectory_records = trajectories.to_dict(orient="records")
-
-    return {
-        "total_exposure": float(holdings["Exposure"].sum()),
-        "total_cost_basis": float(holdings["Cost_Basis"].sum()),
-        "total_unrealized_pnl": float(holdings["Unrealized_PnL"].sum()),
-        "position_count": int(len(holdings)),
-        "hhi": round(hhi, 2),
-        "hhi_classification": classify_hhi(hhi),
-        "effective_positions": round(effective_positions(hhi), 2),
-        "portfolio_beta": advanced_risk["portfolio_beta"],
-        "var_95_percent": advanced_risk["var_95_percent"],
-        "var_dollar": advanced_risk["var_dollar"],
-        "individual_betas": advanced_risk["individual_betas"],
-        "largest_position": {
-            "ticker": str(holdings.loc[holdings["Weight"].idxmax(), "Ticker"]),
-            "weight": float(holdings["Weight"].max()),
+    # 2. Sector Allocation Vector
+    sector_alloc = get_sector_allocations(holdings)
+    
+    # 3. Advanced Risk (Beta, VaR, Correlations)
+    risk_metrics = compute_advanced_risk_metrics(holdings)
+    
+    # 4. Construct JSON Payload
+    report = {
+        "portfolio_summary": base_metrics,
+        "allocations": {
+            "sector": sector_alloc
         },
-        "tiers": {
-            tier: {
-                "exposure": float(row["Exposure"]),
-                "weight": float(row["Weight"]),
-                "positions": int(row["Positions"]),
-                "weighted_return": float(row["Weighted_Return"]),
-            }
-            for tier, row in tiers.iterrows()
-        },
-        "trajectories": trajectory_records,
-        "holdings": holdings.round(4).to_dict(orient="records"),
+        "risk_analysis": risk_metrics
     }
+    
+    return report

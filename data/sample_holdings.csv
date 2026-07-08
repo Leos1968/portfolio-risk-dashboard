@@ -1,0 +1,11 @@
+Ticker,Shares,Average_Price,Current_Price,Tier
+AAPL,50,175.00,210.00,Growth
+MSFT,30,350.00,420.00,Core
+NVDA,40,450.00,480.00,Growth
+O,100,55.00,60.00,Defensive
+JPM,25,160.00,195.00,Core
+AVGO,12,900.00,1150.00,Growth
+PG,60,145.00,158.00,Defensive
+XOM,45,105.00,118.00,Core
+UNH,15,480.00,510.00,Core
+TLT,80,92.00,95.00,Defensive

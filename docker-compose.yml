@@ -1,0 +1,26 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Uncomment to enable the paid-API key gate:
+      # PORTFOLIO_API_KEYS: "demo-key-123"
+      PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+  dashboard:
+    build: .
+    command: streamlit run frontend/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      PORTFOLIO_API_URL: "http://api:8000"
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      api:
+        condition: service_healthy

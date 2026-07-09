@@ -53,6 +53,21 @@ _Z_95 = 1.645
 # Conservative daily volatility assumed when market data is unavailable
 _FALLBACK_DAILY_VOL = 0.02
 
+# Annualized risk-free rate used for Sharpe (≈ 3-month T-bill; update as rates move)
+RISK_FREE_RATE = 0.045
+
+_TRADING_DAYS = 252
+
+# Historical market shocks for beta-scaled stress testing.
+# (name, description, S&P 500 move over the episode)
+STRESS_SCENARIOS = [
+    ("Black Monday 1987", "Worst single trading day in modern history (Oct 19, 1987)", -0.204),
+    ("2008 Financial Crisis", "S&P 500 peak-to-trough, Oct 2007 – Mar 2009", -0.57),
+    ("COVID-19 Crash", "Fastest 30%+ drawdown on record, Feb–Mar 2020", -0.34),
+    ("2022 Rate-Hike Bear Market", "Inflation and rate-shock selloff, Jan–Oct 2022", -0.25),
+    ("Standard 10% Correction", "A routine market correction", -0.10),
+]
+
 # Tier assumptions used only for the synthetic trailing trajectories
 # (annualized drift, annualized volatility)
 _TIER_PROFILES = {
@@ -274,6 +289,7 @@ def compute_advanced_risk_metrics(
         "var_95_percent": round(_Z_95 * _FALLBACK_DAILY_VOL * 100, 2),
         "var_dollar": round(total_value * _Z_95 * _FALLBACK_DAILY_VOL, 2),
         "individual_betas": {t: 1.0 for t in tickers},
+        "daily_volatility": _FALLBACK_DAILY_VOL,
         "market_data": "unavailable",
     }
 
@@ -331,8 +347,152 @@ def compute_advanced_risk_metrics(
         "var_95_percent": round(float(_Z_95 * volatility * 100), 2),
         "var_dollar": round(float(total_value * _Z_95 * volatility), 2),
         "individual_betas": individual_betas,
+        "daily_volatility": round(float(volatility), 6),
         # "live" only if at least one asset (not just the benchmark) downloaded
         "market_data": "live" if valid_tickers else "unavailable",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Performance, correlation & stress analytics
+# ---------------------------------------------------------------------------
+
+def _portfolio_daily_returns(
+    holdings: pd.DataFrame,
+    close_prices: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series]:
+    """Weighted portfolio daily returns and benchmark daily returns.
+
+    Weights are renormalized over the tickers that actually downloaded.
+    Returns two (possibly empty) aligned Series.
+    """
+    empty = pd.Series(dtype=float)
+    if close_prices.empty:
+        return empty, empty
+
+    returns = close_prices.pct_change().dropna(how="all")
+    weights = holdings.set_index("Ticker")["Weight"]
+    valid = [t for t in holdings["Ticker"] if t in returns.columns]
+    if not valid or len(returns) < 20:
+        return empty, empty
+
+    w = weights.reindex(valid).fillna(0.0)
+    if w.sum() > 0:
+        w = w / w.sum()
+    port_ret = returns[valid].fillna(0.0).mul(w, axis=1).sum(axis=1)
+
+    bench_ret = (
+        returns[BENCHMARK].fillna(0.0)
+        if BENCHMARK in returns.columns
+        else pd.Series(dtype=float)
+    )
+    return port_ret, bench_ret
+
+
+def compute_performance_analytics(
+    holdings: pd.DataFrame,
+    close_prices: pd.DataFrame,
+) -> dict[str, Any]:
+    """Trailing-1y performance: return, volatility, Sharpe, max drawdown,
+    historical VaR, and indexed portfolio-vs-benchmark series for charting.
+
+    Returns {"available": False} when market data is missing so callers
+    (and the UI) can degrade gracefully.
+    """
+    port_ret, bench_ret = _portfolio_daily_returns(holdings, close_prices)
+    if port_ret.empty:
+        return {"available": False}
+
+    index = 100.0 * (1.0 + port_ret).cumprod()
+    drawdown = index / index.cummax() - 1.0
+
+    ann_vol = float(port_ret.std() * np.sqrt(_TRADING_DAYS))
+    total_return = float(index.iloc[-1] / 100.0 - 1.0)
+    mean_ann = float(port_ret.mean() * _TRADING_DAYS)
+    sharpe = (mean_ann - RISK_FREE_RATE) / ann_vol if ann_vol > 0 else 0.0
+
+    downside = port_ret[port_ret < 0]
+    downside_vol = float(downside.std() * np.sqrt(_TRADING_DAYS)) if len(downside) > 1 else 0.0
+    sortino = (mean_ann - RISK_FREE_RATE) / downside_vol if downside_vol > 0 else 0.0
+
+    out: dict[str, Any] = {
+        "available": True,
+        "period_return": round(total_return, 4),
+        "annual_volatility": round(ann_vol, 4),
+        "sharpe_ratio": round(sharpe, 2),
+        "sortino_ratio": round(sortino, 2),
+        "max_drawdown": round(float(drawdown.min()), 4),
+        "hist_var_95_percent": round(float(-np.percentile(port_ret, 5)) * 100, 2),
+        "daily_returns": [round(float(r), 6) for r in port_ret],
+        "dates": [d.strftime("%Y-%m-%d") for d in port_ret.index],
+        "portfolio_index": [round(float(v), 2) for v in index],
+        "drawdown": [round(float(v), 4) for v in drawdown],
+    }
+
+    if not bench_ret.empty:
+        bench_index = 100.0 * (1.0 + bench_ret).cumprod()
+        out["benchmark_index"] = [round(float(v), 2) for v in bench_index.reindex(port_ret.index).ffill()]
+        out["benchmark_return"] = round(float(bench_index.iloc[-1] / 100.0 - 1.0), 4)
+
+    return out
+
+
+def compute_correlations(
+    holdings: pd.DataFrame,
+    close_prices: pd.DataFrame,
+) -> dict[str, Any]:
+    """Pairwise correlation matrix of daily returns for the downloaded tickers."""
+    if close_prices.empty:
+        return {"available": False}
+    returns = close_prices.pct_change().dropna(how="all")
+    valid = [t for t in holdings["Ticker"] if t in returns.columns]
+    if len(valid) < 2 or len(returns) < 20:
+        return {"available": False}
+    corr = returns[valid].corr().round(2)
+    return {
+        "available": True,
+        "tickers": valid,
+        "matrix": [[float(v) for v in row] for row in corr.to_numpy()],
+    }
+
+
+def compute_stress_tests(portfolio_beta: float, total_value: float) -> list[dict[str, Any]]:
+    """Beta-scaled first-order impact of historical market shocks.
+
+    Estimated move = portfolio beta × market move. A deliberate simplification:
+    it ignores convexity, correlation breakdown, and flight-to-quality effects,
+    which the UI discloses.
+    """
+    out = []
+    for name, description, market_move in STRESS_SCENARIOS:
+        impact_pct = portfolio_beta * market_move
+        out.append(
+            {
+                "scenario": name,
+                "description": description,
+                "market_move": round(market_move, 4),
+                "portfolio_impact_pct": round(impact_pct, 4),
+                "portfolio_impact_dollar": round(total_value * impact_pct, 2),
+            }
+        )
+    return out
+
+
+def price_history_records(
+    holdings: pd.DataFrame,
+    close_prices: pd.DataFrame,
+) -> dict[str, Any]:
+    """Per-ticker daily close history for drill-down charts (JSON-safe)."""
+    if close_prices.empty:
+        return {"available": False}
+    valid = [t for t in holdings["Ticker"] if t in close_prices.columns]
+    if not valid:
+        return {"available": False}
+    closes = close_prices[valid].ffill().bfill().round(2)
+    return {
+        "available": True,
+        "dates": [d.strftime("%Y-%m-%d") for d in closes.index],
+        "series": {t: [float(v) for v in closes[t]] for t in valid},
     }
 
 
@@ -363,6 +523,11 @@ def portfolio_report(df: pd.DataFrame) -> dict[str, Any]:
     hhi = compute_hhi(holdings["Weight"].to_numpy())
     tiers = tier_summary(holdings)
     advanced_risk = compute_advanced_risk_metrics(holdings, close_prices)
+    performance = compute_performance_analytics(holdings, close_prices)
+    correlations = compute_correlations(holdings, close_prices)
+    total_value = float(holdings["Exposure"].sum())
+    stress_tests = compute_stress_tests(advanced_risk["portfolio_beta"], total_value)
+    prices_out = price_history_records(holdings, close_prices)
 
     trajectories = tier_growth_trajectories(holdings)
     trajectories["Period"] = trajectories["Period"].dt.strftime("%Y-%m-%d")
@@ -379,7 +544,13 @@ def portfolio_report(df: pd.DataFrame) -> dict[str, Any]:
         "var_95_percent": advanced_risk["var_95_percent"],
         "var_dollar": advanced_risk["var_dollar"],
         "individual_betas": advanced_risk["individual_betas"],
+        "daily_volatility": advanced_risk["daily_volatility"],
         "market_data": advanced_risk["market_data"],
+        "risk_free_rate": RISK_FREE_RATE,
+        "performance": performance,
+        "correlations": correlations,
+        "stress_tests": stress_tests,
+        "price_history": prices_out,
         "largest_position": {
             "ticker": str(holdings.loc[holdings["Weight"].idxmax(), "Ticker"]),
             "weight": float(holdings["Weight"].max()),

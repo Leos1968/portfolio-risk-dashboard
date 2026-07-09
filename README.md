@@ -8,7 +8,9 @@
 A full-stack quantitative risk engine that pulls **live daily market data from Wall Street** (Yahoo Finance)
 and computes the risk metrics used on institutional trading desks — for any portfolio you upload as a CSV.
 
-**▶ Live demo:** https://portfolio-risk-dashboard.streamlit.app
+**▶ Live demos:**
+- **[Institutional Risk Dashboard](https://institutional-risk-dashboard.streamlit.app)** — upload a holdings CSV, get a full risk report (`frontend/app.py`)
+- **[Market Command Center](https://jeriel-risk-dashboard.streamlit.app)** — daily Wall Street briefing + interactive portfolio lab (`analyzer/dashboard.py`)
 
 ## What it computes
 

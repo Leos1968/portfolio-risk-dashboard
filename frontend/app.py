@@ -112,7 +112,7 @@ def load_holdings() -> pd.DataFrame:
     st.sidebar.markdown(
         f"**About this project**\n\n"
         f"Live risk engine: Python · pandas · FastAPI · Streamlit · Yahoo Finance\n\n"
-        f"[🛰️ Market Command Center (sister app)](https://jeriel-risk-dashboard.streamlit.app)  \n"
+        f"[🛰️ Market Command Center (sister app)](https://institutional-risk-dashboard.streamlit.app)  \n"
         f"[⭐ Source on GitHub]({GITHUB_URL})  \n"
         f"[👤 Built by Jeriel De Leon]({AUTHOR_URL})"
     )

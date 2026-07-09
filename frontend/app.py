@@ -79,7 +79,7 @@ def load_holdings() -> pd.DataFrame:
 # Analytics (API-first, local fallback)
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=900)  # refresh market data every 15 min
 def get_report(df: pd.DataFrame) -> tuple[dict, str]:
     """Fetch the analytics report, preferring the FastAPI backend.
 
@@ -189,6 +189,12 @@ def main() -> None:
         "⚡ Analytics & Live Market Data served by FastAPI backend" if source == "api"
         else "💻 Backend offline — computations & live market data processed locally."
     )
+    if report.get("market_data") == "unavailable":
+        st.warning(
+            "Live market data is temporarily unavailable (Yahoo Finance rate limit or "
+            "network issue). Showing prices from your uploaded holdings; Beta/VaR use "
+            "conservative defaults. Refresh in a few minutes."
+        )
 
     holdings = pd.DataFrame(report["holdings"])
 

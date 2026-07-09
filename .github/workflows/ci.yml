@@ -19,4 +19,4 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
       - name: Run tests (offline — market data stubbed)
-        run: pytest tests/ -v
+        run: python -m pytest tests/ -v

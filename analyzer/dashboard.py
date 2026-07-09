@@ -93,7 +93,7 @@ if st.sidebar.button("🔄 Refresh all market data"):
 st.sidebar.divider()
 st.sidebar.markdown(
     f"**Explore more**\n\n"
-    f"[📊 Institutional dashboard (sister app)](https://jeriel-risk-dashboard.streamlit.app)  \n"
+    f"[📊 Institutional dashboard (sister app)](https://institutional-risk-dashboard.streamlit.app)  \n"
     f"[⭐ Source code on GitHub]({GITHUB_URL})  \n"
     f"[👤 Built by Jeriel De Leon]({AUTHOR_URL})"
 )
@@ -435,7 +435,7 @@ with tab_learn:
         f"statistics in pandas/NumPy. No databases, no API keys — "
         f"[read the source on GitHub]({GITHUB_URL}). For the institutional version with "
         f"CSV upload, HHI concentration, correlation heatmaps, and parametric-vs-historical VaR, "
-        f"see the [sister dashboard](https://jeriel-risk-dashboard.streamlit.app)."
+        f"see the [sister dashboard](https://institutional-risk-dashboard.streamlit.app)."
     )
 
     st.subheader("Glossary")

@@ -11,7 +11,7 @@ and computes the risk metrics used on institutional trading desks — for any po
 **▶ Live demos:**
 - **[Institutional Risk Dashboard](https://institutional-risk-dashboard.streamlit.app)** — upload a holdings CSV, get a full risk report (`frontend/app.py`)
 - **[Market Command Center](https://market-command-dashboard.streamlit.app)** — daily Wall Street briefing + interactive portfolio lab (`analyzer/dashboard.py`)
-- **IB/PE Modeling Suite** — three-statement · M&A accretion/dilution · LBO returns (`modeling/model.py`, runs locally / deploy-ready)
+- **[IB/PE Modeling Suite](https://market-command-dashboard.streamlit.app)** — three-statement · M&A accretion/dilution · LBO returns, a second page of the Market Command Center (`modeling/`)
 
 ## What it computes
 
@@ -76,8 +76,9 @@ articulation, and the M&A/LBO arithmetic** (`tests/test_modeling.py`) — 28 tes
 ## IB/PE Modeling Suite (`modeling/`)
 
 The corporate-finance counterpart to the risk tools — the models an investment-banking or
-private-equity analyst actually builds, as a third standalone Streamlit app (`modeling/model.py`)
-over pure, unit-tested engines:
+private-equity analyst actually builds. It ships as a **second page of the Market Command Center**
+(`analyzer/dashboard.py` mounts it via `st.navigation`, so it auto-deploys on push-to-main) and also
+runs standalone with `streamlit run modeling/model.py`. Pure, unit-tested engines under a thin UI:
 
 | Tab | What it does |
 |---|---|

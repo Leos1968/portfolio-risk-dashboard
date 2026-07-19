@@ -11,6 +11,7 @@ and computes the risk metrics used on institutional trading desks — for any po
 **▶ Live demos:**
 - **[Institutional Risk Dashboard](https://institutional-risk-dashboard.streamlit.app)** — upload a holdings CSV, get a full risk report (`frontend/app.py`)
 - **[Market Command Center](https://market-command-dashboard.streamlit.app)** — daily Wall Street briefing + interactive portfolio lab (`analyzer/dashboard.py`)
+- **IB/PE Modeling Suite** — three-statement · M&A accretion/dilution · LBO returns (`modeling/model.py`, runs locally / deploy-ready)
 
 ## What it computes
 
@@ -51,7 +52,8 @@ beginners and holds up to expert scrutiny.
 
 ```bash
 pip install -r requirements.txt
-streamlit run frontend/app.py            # standalone (no API needed)
+streamlit run frontend/app.py            # standalone risk dashboard (no API needed)
+streamlit run modeling/model.py          # IB/PE modeling suite (three-statement, M&A, LBO)
 
 # optional: run the REST API too
 uvicorn backend.main:app --reload        # docs at http://localhost:8000/docs
@@ -68,6 +70,29 @@ pytest tests/ -v
 
 The suite stubs all market data, so it runs offline and in CI — covering validation, HHI math,
 the live-data path, and every degradation path (Yahoo down, benchmark-only downloads, bad rows).
+The modeling engines add deterministic tests that enforce **balance-sheet integrity, statement
+articulation, and the M&A/LBO arithmetic** (`tests/test_modeling.py`) — 28 tests total.
+
+## IB/PE Modeling Suite (`modeling/`)
+
+The corporate-finance counterpart to the risk tools — the models an investment-banking or
+private-equity analyst actually builds, as a third standalone Streamlit app (`modeling/model.py`)
+over pure, unit-tested engines:
+
+| Tab | What it does |
+|---|---|
+| **Three-Statement Model** | Driver-based, fully-linked IS/BS/CFS that *articulates* and **balances to the penny** — a live check proves `Assets − (L+E) ≈ 0` in every projected year. Revolver cash-plug; interest on beginning-of-period debt to avoid circular references. |
+| **M&A / Accretion-Dilution** | Sources & uses, pro-forma EPS, accretion/(dilution) %, breakeven synergies, goodwill, ownership split, and premium×mix / synergies×premium sensitivity heatmaps. |
+| **LBO / Returns** | Entry leverage → free-cash-flow debt sweep → exit, with IRR/MOIC, a value-creation waterfall (EBITDA growth vs. multiple vs. deleveraging), and an exit-multiple × leverage IRR grid. |
+
+Engines live in `modeling/three_statement.py`, `ma_model.py`, and `lbo_model.py`; correctness is
+enforced by `tests/test_modeling.py`.
+
+## Investment memos (`research/`)
+
+A short pitch book that pairs with the suite — a **long** (Visa), a **short/avoid** (Tesla), and a
+**PE buyout** (US Foods), each fact-checked against primary filings and dated. See
+[`research/`](research/).
 
 ## Honest limitations
 
